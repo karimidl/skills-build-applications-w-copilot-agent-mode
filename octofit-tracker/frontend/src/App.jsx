@@ -18,6 +18,7 @@ import {
   X,
   Zap,
 } from 'lucide-react'
+import { apiRequest } from './api.js'
 import mascot from '../../../docs/octofitapp-small.png'
 import './App.css'
 
@@ -91,16 +92,54 @@ function formatNumber(value) {
   return new Intl.NumberFormat('fr-FR').format(value)
 }
 
+function formatActivity(record) {
+  const kind = activityKinds[record.type] ?? activityKinds.run
+  const date = record.createdAt ? new Date(record.createdAt) : new Date()
+  const time = new Intl.DateTimeFormat('fr-FR', {
+    weekday: 'short',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(date)
+  const distanceLabel = record.distance ? ` · ${String(record.distance).replace('.', ',')} km` : ''
+
+  return {
+    id: record._id ?? record.id,
+    title: kind.label,
+    detail: `${kind.detail}${record.type === 'strength' ? '' : distanceLabel}`,
+    time,
+    duration: `${record.duration} min`,
+    points: `+${record.points} pts`,
+    Icon: kind.Icon,
+    tone: kind.tone,
+  }
+}
+
+function formatWorkoutDifficulty(difficulty) {
+  const labels = {
+    easy: 'Facile',
+    moderate: 'Modérée',
+    hard: 'Difficile',
+  }
+
+  return labels[difficulty?.toLowerCase()] ?? difficulty ?? 'Tous niveaux'
+}
+
 function App() {
   const [activeSection, setActiveSection] = useState('overview')
   const [chartMode, setChartMode] = useState('steps')
   const [activities, setActivities] = useState(startingActivities)
+  const [leaderboardUsers, setLeaderboardUsers] = useState(classmates)
+  const [teams, setTeams] = useState([])
+  const [suggestedWorkouts, setSuggestedWorkouts] = useState([])
   const [activeMinutes, setActiveMinutes] = useState(54)
   const [calories, setCalories] = useState(462)
   const [modalOpen, setModalOpen] = useState(false)
   const [activityType, setActivityType] = useState('run')
   const [duration, setDuration] = useState('30')
   const [distance, setDistance] = useState('')
+  const [apiStatus, setApiStatus] = useState('loading')
+  const [apiError, setApiError] = useState('')
+  const [isSaving, setIsSaving] = useState(false)
   const todayIndex = (referenceDate.getDay() + 6) % 7
   const todayLabel = new Intl.DateTimeFormat('fr-FR', {
     weekday: 'long',
@@ -114,6 +153,72 @@ function App() {
   ))
   const chartMax = chartMode === 'steps' ? 12000 : 70
   const weekTotal = chartValues.reduce((total, day) => total + day[chartMode], 0)
+  const activeTeam = teams.find((team) => team.members.includes('mila')) ?? teams[0]
+  const activeTeamRank = activeTeam
+    ? [...teams].sort((first, second) => second.points - first.points)
+      .findIndex((team) => team._id === activeTeam._id) + 1
+    : 2
+  const totalTeamPoints = teams.reduce((total, team) => total + team.points, 0)
+  const teamMembers = activeTeam
+    ? activeTeam.members.map((username) => ({
+      username,
+      initials: username.charAt(0).toUpperCase(),
+    }))
+    : []
+  const suggestedWorkout = suggestedWorkouts[0]
+
+  useEffect(() => {
+    let cancelled = false
+
+    Promise.all([
+      apiRequest('/api/users/'),
+      apiRequest('/api/activities/'),
+      apiRequest('/api/teams/'),
+      apiRequest('/api/leaderboard/'),
+      apiRequest('/api/workouts/'),
+    ])
+      .then(([users, records, teamRecords, leaderboardRecords, workoutRecords]) => {
+        if (
+          !Array.isArray(users) ||
+          !Array.isArray(records) ||
+          !Array.isArray(teamRecords) ||
+          !Array.isArray(leaderboardRecords) ||
+          !Array.isArray(workoutRecords)
+        ) {
+          throw new Error('The API returned an invalid response.')
+        }
+
+        if (!cancelled) {
+          setActivities(records.map(formatActivity))
+          setLeaderboardUsers(
+            [...leaderboardRecords]
+              .sort((first, second) => first.rank - second.rank)
+              .slice(0, 3)
+              .map((person, index) => ({
+                name: person.username.charAt(0).toUpperCase() + person.username.slice(1),
+                team: person.team,
+                points: formatNumber(person.points),
+                initials: person.username.charAt(0).toUpperCase(),
+                tone: ['avatar-coral', 'avatar-mint', 'avatar-blue'][index],
+              })),
+          )
+          setTeams(teamRecords)
+          setSuggestedWorkouts(workoutRecords)
+          setApiStatus('connected')
+        }
+      })
+      .catch((error) => {
+        console.error('Unable to load Octofit API data:', error)
+        if (!cancelled) {
+          setApiStatus('error')
+          setApiError('Impossible de charger les données depuis l’API. Vérifie que le backend est démarré.')
+        }
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   useEffect(() => {
     if (!modalOpen) return undefined
@@ -129,30 +234,37 @@ function App() {
     setModalOpen(true)
   }
 
-  function addActivity(event) {
+  async function addActivity(event) {
     event.preventDefault()
     const minutes = Number(duration)
-    const kind = activityKinds[activityType]
-    const distanceLabel = distance ? ` · ${distance.replace('.', ',')} km` : ''
+    setIsSaving(true)
+    setApiError('')
 
-    setActivities((current) => [
-      {
-        id: Date.now(),
-        title: kind.label,
-        detail: `${kind.detail}${activityType === 'strength' ? '' : distanceLabel}`,
-        time: `Aujourd’hui · ${new Intl.DateTimeFormat('fr-FR', { hour: '2-digit', minute: '2-digit' }).format(new Date())}`,
-        duration: `${minutes} min`,
-        points: `+${minutes * 3} pts`,
-        Icon: kind.Icon,
-        tone: kind.tone,
-      },
-      ...current,
-    ])
-    setActiveMinutes((current) => current + minutes)
-    setCalories((current) => current + Math.round(minutes * 7.5))
-    setDuration('30')
-    setDistance('')
-    setModalOpen(false)
+    try {
+      const record = await apiRequest('/api/activities/', {
+        method: 'POST',
+        body: JSON.stringify({
+          user: 'mila',
+          type: activityType,
+          duration: minutes,
+          distance: distance ? Number(distance) : 0,
+          calories: Math.round(minutes * 7.5),
+          points: minutes * 3,
+        }),
+      })
+
+      setActivities((current) => [formatActivity(record), ...current])
+      setActiveMinutes((current) => current + minutes)
+      setCalories((current) => current + Math.round(minutes * 7.5))
+      setDuration('30')
+      setDistance('')
+      setModalOpen(false)
+    } catch (error) {
+      console.error('Unable to save activity:', error)
+      setApiError('Impossible d’enregistrer l’activité. Réessaie lorsque l’API sera disponible.')
+    } finally {
+      setIsSaving(false)
+    }
   }
 
   return (
@@ -198,7 +310,7 @@ function App() {
         <header className="topbar">
           <div>
             <p className="topbar-date">{todayLabel.charAt(0).toUpperCase() + todayLabel.slice(1)}</p>
-            <p className="demo-note"><span /> DONNÉES DE DÉMO</p>
+            <p className="demo-note"><span /> {apiStatus === 'connected' ? 'API CONNECTÉE' : apiStatus === 'error' ? 'API INDISPONIBLE' : 'CONNEXION API…'}</p>
           </div>
           <div className="topbar-actions">
             <div className="topbar-profile"><div className="profile-avatar">ML</div><span>Mila</span></div>
@@ -208,6 +320,7 @@ function App() {
             </button>
           </div>
         </header>
+        {apiError && <div className="alert alert-danger mx-4 mt-3" role="alert">{apiError}</div>}
 
         <div className="dashboard">
           <section className="welcome-row" id="overview">
@@ -308,22 +421,22 @@ function App() {
               </section>
 
               <section className="team-panel" id="teams">
-                <div className="team-topline"><span className="team-emblem"><Users size={17} /></span><span>LE DÉFI DES ÉQUIPES</span><span className="team-rank">2<sup>e</sup></span></div>
-                <h2>Les Comètes</h2>
+                <div className="team-topline"><span className="team-emblem"><Users size={17} /></span><span>LE DÉFI DES ÉQUIPES</span><span className="team-rank">{activeTeamRank || 1}<sup>e</sup></span></div>
+                <h2>{activeTeam?.name ?? 'Les Comètes'}</h2>
                 <p className="team-subtitle">Ensemble, on va plus loin.</p>
-                <div className="team-progress-label"><span>1 248 pts</span><span>1 390 pts</span></div>
-                <div className="team-progress"><span /></div>
-                <div className="team-bottom"><div className="avatar-stack"><span className="avatar avatar-coral">N</span><span className="avatar avatar-mint">M</span><span className="avatar avatar-blue">I</span><span className="avatar avatar-more">+4</span></div><a href="#leaderboard" aria-label="Voir le classement"><ChevronRight size={18} /></a></div>
+                <div className="team-progress-label"><span>{formatNumber(activeTeam?.points ?? 1248)} pts</span><span>{formatNumber(totalTeamPoints || 1390)} pts</span></div>
+                <div className="team-progress"><span style={{ width: `${activeTeam && totalTeamPoints ? Math.round((activeTeam.points / totalTeamPoints) * 100) : 90}%` }} /></div>
+                <div className="team-bottom"><div className="avatar-stack">{(teamMembers.length ? teamMembers : [{ initials: 'N' }, { initials: 'M' }, { initials: 'I' }]).slice(0, 4).map((member, index) => <span className={`avatar ${['avatar-coral', 'avatar-mint', 'avatar-blue'][index]}`} key={member.username ?? member.initials}>{member.initials}</span>)}{teamMembers.length > 4 && <span className="avatar avatar-more">+{teamMembers.length - 4}</span>}</div><a href="#leaderboard" aria-label="Voir le classement"><ChevronRight size={18} /></a></div>
               </section>
 
               <section className="panel leaderboard-panel" id="leaderboard">
                 <div className="panel-heading compact-heading"><div><p className="section-kicker">CETTE SEMAINE</p><h2>Classement</h2></div><Trophy className="heading-icon trophy-icon" size={20} /></div>
                 <div className="leader-list">
-                  {classmates.map((person, index) => (
-                    <div className={person.name === 'Mila' ? 'leader-row you' : 'leader-row'} key={person.name}>
+                  {leaderboardUsers.map((person, index) => (
+                    <div className={person.name.toLowerCase() === 'mila' ? 'leader-row you' : 'leader-row'} key={person.name}>
                       <span className="leader-rank">0{index + 1}</span>
                       <span className={`avatar ${person.tone}`}>{person.initials}</span>
-                      <span className="leader-name"><strong>{person.name}{person.name === 'Mila' && <small>TOI</small>}</strong><span>{person.team}</span></span>
+                      <span className="leader-name"><strong>{person.name}{person.name.toLowerCase() === 'mila' && <small>TOI</small>}</strong><span>{person.team}</span></span>
                       <strong className="leader-score">{person.points}<small> pts</small></strong>
                     </div>
                   ))}
@@ -332,7 +445,11 @@ function App() {
 
               <section className="workout-panel" id="workouts">
                 <div className="workout-art"><span className="workout-sun" /><Dumbbell size={29} strokeWidth={1.7} /><span className="workout-tag"><Sparkles size={13} /> POUR TOI</span></div>
-                <div className="workout-copy"><p className="section-kicker">SÉANCE CONSEILLÉE</p><h2>Circuit énergie</h2><p>Un petit boost, sans matériel.</p><div className="workout-meta"><span><Clock3 size={14} /> 18 min</span><span><Activity size={14} /> Facile</span></div><button className="workout-button" type="button" onClick={() => openActivityForm('strength')}>Enregistrer la séance <ChevronRight size={16} /></button></div>
+                <div className="workout-copy"><p className="section-kicker">SÉANCE CONSEILLÉE</p><h2>{suggestedWorkout?.name ?? 'Circuit énergie'}</h2><p>{suggestedWorkout?.description ?? 'Un petit boost, sans matériel.'}</p><div className="workout-meta"><span><Clock3 size={14} /> {suggestedWorkout?.duration ?? 18} min</span><span><Activity size={14} /> {formatWorkoutDifficulty(suggestedWorkout?.difficulty ?? 'easy')}</span></div><button className="workout-button" type="button" onClick={() => {
+                  const workoutType = suggestedWorkout?.category === 'cardio' ? 'run' : 'strength'
+                  setDuration(String(suggestedWorkout?.duration ?? 30))
+                  openActivityForm(workoutType)
+                }}>Enregistrer la séance <ChevronRight size={16} /></button></div>
               </section>
             </aside>
           </div>
@@ -353,7 +470,9 @@ function App() {
                 <div><label htmlFor="activity-duration">Durée (minutes)</label><input id="activity-duration" type="number" min="5" max="240" value={duration} onChange={(event) => setDuration(event.target.value)} required /></div>
                 {activityType !== 'strength' && <div><label htmlFor="activity-distance">Distance (km)</label><input id="activity-distance" type="number" min="0.1" step="0.1" placeholder="Facultatif" value={distance} onChange={(event) => setDistance(event.target.value)} /></div>}
               </div>
-              <button className="primary-button modal-submit" type="submit"><Check size={17} /> Enregistrer</button>
+              <button className="primary-button modal-submit" type="submit" disabled={isSaving}>
+                <Check size={17} /> {isSaving ? 'Enregistrement…' : 'Enregistrer'}
+              </button>
             </form>
           </section>
         </div>

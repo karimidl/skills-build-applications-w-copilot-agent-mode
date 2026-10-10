@@ -13,6 +13,24 @@ const codespaceName = process.env.CODESPACE_NAME;
 const baseUrl = codespaceName ? `https://${codespaceName}-8000.app.github.dev` : 'http://localhost:8000';
 
 app.use(express.json());
+app.use((request, response, next) => {
+  const origin = request.headers.origin;
+  const isLocalFrontend = origin === 'http://localhost:5173' || origin === 'http://127.0.0.1:5173';
+  const isCodespacesFrontend = origin && /^https:\/\/[a-z0-9-]+-5173\.app\.github\.dev$/.test(origin);
+
+  if (isLocalFrontend || isCodespacesFrontend) {
+    response.setHeader('Access-Control-Allow-Origin', origin);
+    response.setHeader('Vary', 'Origin');
+    response.setHeader('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  }
+
+  if (request.method === 'OPTIONS') {
+    return response.sendStatus(204);
+  }
+
+  return next();
+});
 
 const fallbackUsers = [
   { id: 'user-1', username: 'mila', email: 'mila@example.com', team: 'Comets', points: 1248 },
